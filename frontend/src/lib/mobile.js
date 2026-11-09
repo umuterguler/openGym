@@ -185,6 +185,9 @@ export function buildReminderNotifications(S, now = new Date()) {
       title: t('Workout day'),
       body: t('{0} is on the plan today. Let’s go!', label),
       schedule: { at, allowWhileIdle: true },
+      // These reminders are planned during startup as well as from Settings. Do not let the
+      // Capacitor plugin open Android's Alarms & reminders settings during a background resync.
+      isExactNotification: false,
     })
   }
   return notifications
@@ -224,6 +227,7 @@ export function buildNudgeNotifications(S, now = new Date()) {
       title: t(copy.title),
       body: t(copy.lines[lineIndex(iso, copy.lines.length)], label),
       schedule: { at: when, allowWhileIdle: true },
+      isExactNotification: false,
     })
   }
   return notifications

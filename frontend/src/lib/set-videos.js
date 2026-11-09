@@ -21,7 +21,7 @@
 //
 // They are the owner's own: no Coach payload, MCP tool (get_workout says how many, nothing
 // more), share card, Wrapped, PDF, plan file or CSV reads `media`. The tests pin that.
-import { normalizeMediaRef } from './media-refs.js'
+import { normalizeMediaRef, normalizeTrimRange } from './media-refs.js'
 import { sameWorkout } from './workout-date.js'
 import { stampWorkout } from './sync-merge.js'
 import { isWarmupRow } from './workout-model.js'
@@ -55,6 +55,15 @@ export function setVideosOf(set) {
 
 /** The set's video, or null. */
 export const setVideoOf = set => setVideosOf(set)[0] || null
+
+/** Form videos in an already-selected historical exercise entry, in set order. */
+export function setVideosInEntry(entry) {
+  if (!isObj(entry)) return []
+  return list(entry.sets).flatMap((row, set) => {
+    const m = setVideoOf(row)
+    return m ? [{ set, row, m }] : []
+  })
+}
 
 /** Every set video of a workout (saved, or the session in progress), in the order of its rows:
  *  [{ entry, set, exId, m }], at most WORKOUT_SET_VIDEOS_MAX. */
@@ -163,6 +172,46 @@ export function removeSavedSetVideo(state, w, hash, now = Date.now()) {
   }
   if (changed) stampWorkout(rec, now)
   return changed
+}
+
+/** Update only a saved set video's playback range. The original ref, local-only flag and file
+ *  hash remain in place; null clears the range. Invalid ranges make no change. */
+export function updateSavedSetVideoTrim(state, w, { entry, set, hash }, trim, now = Date.now()) {
+  const rec = list(state?.workouts).find(x => isObj(x) && sameWorkout(x, w))
+  const row = rec?.entries?.[entry]?.sets?.[set]
+  if (!isObj(row)) return false
+  const current = setVideoOf(row)
+  if (!current || current.hash !== hash) return false
+
+  let next
+  if (trim == null) {
+    const { trim: _trim, ...full } = current
+    next = full
+  } else {
+    const normalized = normalizeTrimRange(trim, current.dur)
+    if (!normalized) return false
+    // normalizeMediaRef omits an exact full-range selection by design.
+    next = normalizeMediaRef({ ...current, trim: normalized })
+  }
+  if (!next || JSON.stringify(current) === JSON.stringify(next)) return false
+  row.media = row.media.map(ref => ref?.hash === hash ? next : ref)
+  stampWorkout(rec, now)
+  return true
+}
+
+/** Replace a saved set's video only after its new bytes have been ingested. The caller preserves
+ *  local-only policy on the replacement; old bytes are left to reference-aware media GC. */
+export function replaceSavedSetVideo(state, w, { entry, set, hash }, ref, now = Date.now()) {
+  const rec = list(state?.workouts).find(x => isObj(x) && sameWorkout(x, w))
+  const row = rec?.entries?.[entry]?.sets?.[set]
+  const current = isObj(row) ? setVideoOf(row) : null
+  const next = normalizeMediaRef(ref)
+  if (!rec || !current || current.hash !== hash || !next || next.kind !== 'video') return false
+  if (current.local === true) next.local = true
+  else delete next.local
+  row.media = row.media.map(item => item?.hash === hash ? next : item)
+  stampWorkout(rec, now)
+  return true
 }
 
 /**

@@ -325,6 +325,37 @@ export function createMediaSync(deps = {}) {
     return true
   }
 
+  /** Immediately reclaims superseded media only after checking every durable state copy. Used
+   *  after a video replacement: unlike normal cache GC, these exact hashes should not linger for
+   *  the one-hour draft grace, but a backup, another workout or an open editor still protects it. */
+  async function removeUnreferencedMedia(hashes) {
+    const candidates = new Set((hashes || []).filter(h => typeof h === 'string'))
+    if (!store || !candidates.size || !store.getState().ready) return false
+    let removed = 0
+    await withLock('opengym-media', async () => {
+      const st = store.getState()
+      const live = keptHashes(st.S)
+      try {
+        const raw = d.storage?.getItem(PERSISTED_KEY)
+        if (raw) for (const h of keptHashes(JSON.parse(raw))) live.add(h)
+      } catch { /* proceed only with other readable state copies */ }
+      try {
+        if (typeof st.stashedMediaHashes === 'function') for (const h of await st.stashedMediaHashes()) live.add(h)
+      } catch { return }
+      try {
+        if (d.nativeLoad) { const saved = await d.nativeLoad(); if (saved) for (const h of keptHashes(saved)) live.add(h) }
+      } catch { return }
+      const present = new Set((await d.media.list()).map(r => r.hash))
+      for (const hash of candidates) {
+        if (!present.has(hash)) continue
+        if (live.has(hash) || d.media.isHeld?.(hash)) continue
+        await d.media.remove(hash)
+        removed++
+      }
+    })
+    return removed
+  }
+
   /**
    * Makes the posters and files of every custom exercise in the plan and in the session in
    * progress local, so they show without a network — and the posters of the photos and videos
@@ -416,7 +447,7 @@ export function createMediaSync(deps = {}) {
     return () => { unsub(); stopPrefetch(); clearTimeout(timer); clearTimeout(gcTimer); globalThis.removeEventListener?.('online', online) }
   }
 
-  return { syncMedia, settle, fetchToStore, mayFetch, localMediaGc, startCustomMediaPrefetch, start, _setStore: s => { store = s } }
+  return { syncMedia, settle, fetchToStore, mayFetch, localMediaGc, removeUnreferencedMedia, startCustomMediaPrefetch, start, _setStore: s => { store = s } }
 }
 
 // The app's own instance, made on first use so importing this module costs nothing.
@@ -427,3 +458,4 @@ export const syncMedia = opts => inst().syncMedia(opts)
 export const fetchToStore = (hash, expect, opts) => inst().fetchToStore(hash, expect, opts)
 export const mayFetch = hash => inst().mayFetch(hash)
 export const localMediaGc = () => inst().localMediaGc()
+export const removeUnreferencedMedia = hashes => inst().removeUnreferencedMedia(hashes)

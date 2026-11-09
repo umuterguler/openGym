@@ -16,7 +16,10 @@ export function wrappedNotification(year, at) {
     id: NOTIFY_ID,
     title: t(WRAPPED_PUSH.title, String(year)),
     body: t(WRAPPED_PUSH.body),
+    // Planned automatically on app launch; a year-in-review nudge does not need exact-alarm
+    // access, and scheduling it must not divert first launch into Android Settings.
     schedule: { at, allowWhileIdle: true },
+    isExactNotification: false,
     extra: { wrapped: year },
   }
 }

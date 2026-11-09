@@ -37,6 +37,7 @@ public class MainActivity extends BridgeActivity {
         registerPlugin(NudgeCheckPlugin.class);
         registerPlugin(GymReminderPlugin.class);
         registerPlugin(AppIconPlugin.class);
+        registerPlugin(VideoMediaPlugin.class);
         registerPlugin(NfcTagsPlugin.class);
         registerPlugin(WidgetBridgePlugin.class);
         registerPlugin(WatchBridgePlugin.class);

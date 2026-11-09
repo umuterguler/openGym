@@ -149,4 +149,21 @@ describe('a workout\'s photos and videos in the zip', () => {
     expect(await storeBackupMedia(read.files, { media: into })).toEqual({ stored: 2, skipped: 0 })
     expect(await into.get(v.hash)).toMatchObject({ mime: 'video/mp4', pending: true })
   })
+
+  it('keeps a set video trim in JSON and ZIP backup while exporting the unchanged original file', async () => {
+    const media = createMediaStore(memoryBackend())
+    const clip = mp4().file
+    const v = await refFor(clip, 'video/mp4', 'video')
+    v.dur = 8.4
+    v.trim = { startSec: 1.25, endSec: 4.75 }
+    await media.put(v.hash, new Blob([clip]), { mime: 'video/mp4' })
+    const S = { ...stateWith([]), workouts: [{ id: 'w-trim', d: '2026-09-20', start: 1, end: 2, entries: [{ id: 'handstand', sets: [{ done: true, media: [v] }] }] }] }
+    const json = await readBackupFile(new File([JSON.stringify(S)], 'backup.json'))
+    expect(json.state.workouts[0].entries[0].sets[0].media[0].trim).toEqual(v.trim)
+    const zip = await exportBackupZip(S, { media })
+    const read = await readBackupFile(new File([zip.blob], 'backup.zip'))
+    expect(read.state.workouts[0].entries[0].sets[0].media[0].trim).toEqual(v.trim)
+    expect(read.files.map(f => f.hash)).toContain(v.hash)
+    expect((await media.get(v.hash)).blob.size).toBe(v.size)
+  })
 })

@@ -15,6 +15,19 @@ const base = (over = {}) => ({
 const clone = o => JSON.parse(JSON.stringify(o))
 const ids = xs => (xs || []).map(x => x.id)
 
+describe('video trim refs in workout sync', () => {
+  it('keeps the last-edited workout version with its trim and original media identity', () => {
+    const ref = { kind: 'video', hash: 'a'.repeat(64), mime: 'video/mp4', size: 1200, width: 720, height: 1280, dur: 9.2, local: true, trim: { startSec: 1, endSec: 5 } }
+    const earlier = { ...workout('video-workout'), _ts: 10, entries: [{ id: 'handstand', sets: [{ done: true, media: [{ ...ref, trim: { startSec: 2, endSec: 6 } }] }] }] }
+    const later = { ...workout('video-workout'), _ts: 20, entries: [{ id: 'handstand', sets: [{ done: true, media: [ref] }] }] }
+    for (const [a, b] of [[earlier, later], [later, earlier]]) {
+      const merged = mergeStates(base({ _ts: a._ts, workouts: [a] }), base({ _ts: b._ts, workouts: [b] }))
+      const saved = merged.workouts[0].entries[0].sets[0].media[0]
+      expect(saved).toMatchObject({ hash: ref.hash, local: true, trim: { startSec: 1, endSec: 5 } })
+    }
+  })
+})
+
 describe('newerOf / unionById / mergeBodyweight', () => {
   it('picks the later _ts, first argument on a tie or missing stamps', () => {
     const a = { _ts: 5 }, b = { _ts: 9 }

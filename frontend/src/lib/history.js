@@ -382,6 +382,16 @@ export const lastAcrossRoutines = S => S?.lastFrom === 'any'
  * means → Any workout" (lastAcrossRoutines) the routine is ignored and the newest session wins.
  */
 export function lastEntryFor(S, exId, rid) {
+  const picked = lastWorkoutEntryFor(S, exId, rid)
+  if (!picked) return null
+  const { workout: _workout, entry: _entry, ...last } = picked
+  return last
+}
+
+/** The workout and entry chosen by "Last time" for an exercise, with the logged work rows.
+ *  Kept alongside lastEntryFor so features that need saved media can follow the same routine,
+ *  exclusion and completed-work rules without reimplementing history selection. */
+export function lastWorkoutEntryFor(S, exId, rid) {
   if (rid && !lastAcrossRoutines(S)) {
     const own = lastEntryIn(S, exId, rid)
     if (own) return own
@@ -415,7 +425,16 @@ function lastEntryIn(S, exId, rid) {
       // session is one the lifter set up) so "start from your last session" can carry them
       // over. `sets` stays work-only: every existing caller reads what it always read.
       const warmups = en.sets.filter(isWarmupRow)
-      return { d: w.d, sets: done, target: en.target || null, ...(slot ? { rid: slot } : {}), ...(en.planned ? { planned: en.planned } : {}), ...(warmups.length ? { warmups } : {}) }
+      return {
+        workout: w,
+        entry: en,
+        d: w.d,
+        sets: done,
+        target: en.target || null,
+        ...(slot ? { rid: slot } : {}),
+        ...(en.planned ? { planned: en.planned } : {}),
+        ...(warmups.length ? { warmups } : {}),
+      }
     }
   }
   return null

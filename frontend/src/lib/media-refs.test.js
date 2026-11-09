@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { readFileSync } from 'node:fs'
-import { normalizeMediaRef, referencedHashes, referencedFiles, cleanUrl, linkKind, mediaOf, fmtClip, HASH_RE } from './media-refs.js'
+import { normalizeMediaRef, normalizeTrimRange, referencedHashes, referencedFiles, cleanUrl, linkKind, mediaOf, fmtClip, HASH_RE } from './media-refs.js'
 
 const A = 'a'.repeat(64)
 const B = 'b'.repeat(64)
@@ -40,6 +40,30 @@ describe('normalizeMediaRef', () => {
     }
     expect(normalizeMediaRef(ref({ kind: 'video', mime: 'video/mp4', codec: 'mjpeg' }))).toBeNull()
     expect(normalizeMediaRef(ref({ codec: 'avc1' }))).toBeNull()
+  })
+
+  it('keeps valid video trim ranges, drops invalid ranges without dropping the video, and leaves legacy videos untrimmed', () => {
+    const video = { ...ref(), kind: 'video', mime: 'video/mp4', dur: 12.4 }
+    expect(normalizeMediaRef(video).trim).toBeUndefined()
+    expect(normalizeMediaRef({ ...video, trim: { startSec: 1.23456, endSec: 8.76543 } }).trim)
+      .toEqual({ startSec: 1.235, endSec: 8.765 })
+    for (const trim of [
+      { startSec: -1, endSec: 2 }, { startSec: 2, endSec: 2 },
+      { startSec: 2, endSec: 12.6 }, { startSec: NaN, endSec: 3 },
+      { startSec: 1, endSec: Infinity }, null,
+    ]) {
+      const normalized = normalizeMediaRef({ ...video, trim })
+      expect(normalized).not.toBeNull()
+      expect(normalized.trim).toBeUndefined()
+    }
+    expect(normalizeMediaRef({ ...video, dur: undefined, trim: { startSec: 1, endSec: 2 } }).trim).toBeUndefined()
+    expect(normalizeMediaRef({ ...ref(), trim: { startSec: 1, endSec: 2 } }).trim).toBeUndefined()
+  })
+
+  it('uses a 0.05 second allowance for rounded source duration and omits a full range', () => {
+    const video = { ...ref(), kind: 'video', mime: 'video/mp4', dur: 12.3 }
+    expect(normalizeTrimRange({ startSec: 2, endSec: 12.34 }, 12.3)).toEqual({ startSec: 2, endSec: 12.3 })
+    expect(normalizeMediaRef({ ...video, trim: { startSec: 0, endSec: 12.3 } }).trim).toBeUndefined()
   })
 
   it('drops a malformed poster and keeps the main file', () => {

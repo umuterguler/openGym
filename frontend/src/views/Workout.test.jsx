@@ -121,6 +121,7 @@ vi.mock('../components/SetVideo.jsx', async () => {
   const React = await import('react')
   return {
     filmSetSheet: filmMocks.filmSetSheet,
+    FormVideoPlayer: ({ m, label }) => React.createElement('div', { className: 'fv-player', 'data-hash': m.hash, 'data-local': String(m.local === true) }, label),
     SetVideoBadge: ({ open, onToggle }) => React.createElement('button', { className: 'fv-badge', 'aria-expanded': open, onClick: onToggle }, 'Form video'),
     ActiveSetVideo: ({ m, at }) => React.createElement('div', { className: 'fv-inline', 'data-hash': m.hash, 'data-at': at.entry + ':' + at.set }),
   }
@@ -3780,7 +3781,96 @@ describe('a set\'s own form video (v1.4.4)', () => {
   const label = (txt) => menuItemsOf(lastMenuOf()).find(it => it.label === txt)
   const HASH = 'ab'.repeat(32)
   const ref = { kind: 'video', hash: HASH, mime: 'video/mp4', size: 3000000, width: 720, height: 1280, dur: 7.2, at: 1 }
+  const previous = (d, rid, sets) => ({ id: d, d, routineIds: [rid], entries: [{ id: 'plain-bench', rid, target: { mode: 'time', sets: sets.length, sec: 30 }, sets }] })
+  const timedExercise = rid => ({ ...exercise('plain-bench', [false]), rid, target: { mode: 'time', sets: 1, sec: 30, weight: 0 } })
   afterEach(() => { filmMocks.filmSetSheet.mockClear() })
+
+  it('does not show an entry point without a previous workout or without videos', async () => {
+    await mount([timedExercise('A')])
+    expect(container.querySelector('.fv-previous')).toBeNull()
+    await unmount()
+    await mount([timedExercise('A')], 0, { workouts: [previous('2026-01-01', 'A', [{ sec: 30, done: true }])] })
+    expect(container.querySelector('.fv-previous')).toBeNull()
+  })
+
+  it('offers one previous video and only mounts playback after the user selects its set', async () => {
+    await mount([timedExercise('A')], 0, { workouts: [previous('2026-01-01', 'A', [{ sec: 30, done: true, media: [ref] }])] })
+    const affordance = container.querySelector('.fv-previous .fv-badge')
+    expect(affordance.textContent).toContain('Last time · Form videos (1)')
+    expect(container.querySelector('.fv-player')).toBeNull()
+    await click(affordance)
+    const set = [...container.querySelectorAll('.fv-previous-list button')][0]
+    expect(set.textContent).toContain('Set 1')
+    expect(set.textContent).toContain('0:30')
+    await click(set)
+    expect(container.querySelector('.fv-player').getAttribute('data-hash')).toBe(HASH)
+  })
+
+  it('lets the user choose among all filmed sets and preserves a local-only ref', async () => {
+    const one = { ...ref, hash: '11'.repeat(32), local: true }
+    const two = { ...ref, hash: '22'.repeat(32) }
+    await mount([timedExercise('A')], 0, { workouts: [previous('2026-01-01', 'A', [
+      { sec: 30, done: true, media: [one] }, { sec: 45, done: true, media: [two] },
+    ])] })
+    await click(container.querySelector('.fv-previous .fv-badge'))
+    const choices = container.querySelectorAll('.fv-previous-list button')
+    expect(choices).toHaveLength(2)
+    expect(choices[0].textContent).toContain('0:30')
+    expect(choices[1].textContent).toContain('0:45')
+    await click(choices[0])
+    expect(container.querySelector('.fv-player').getAttribute('data-local')).toBe('true')
+    await click(choices[1])
+    expect(container.querySelector('.fv-player').getAttribute('data-hash')).toBe(two.hash)
+  })
+
+  it('uses the same routine-versus-any-workout choice as the existing Last time setting', async () => {
+    const a = previous('2026-01-01', 'A', [{ sec: 45, done: true, media: [ref] }])
+    const b = previous('2026-01-03', 'B', [{ sec: 60, done: true, media: [{ ...ref, hash: '33'.repeat(32) }] }])
+    await mount([timedExercise('A')], 0, { lastFrom: 'routine', workouts: [a, b] })
+    await click(container.querySelector('.fv-previous .fv-badge'))
+    expect(container.querySelector('.fv-previous').textContent).toContain('0:45')
+    await unmount()
+    await mount([timedExercise('A')], 0, { lastFrom: 'any', workouts: [a, b] })
+    await click(container.querySelector('.fv-previous .fv-badge'))
+    expect(container.querySelector('.fv-previous').textContent).toContain('1:00')
+  })
+
+  it('hides previous form videos when the Form Videos module is disabled', async () => {
+    await mount([timedExercise('A')], 0, {
+      modules: { videos: false },
+      workouts: [previous('2026-01-01', 'A', [{ sec: 30, done: true, media: [ref] }])],
+    })
+    expect(container.querySelector('.fv-previous')).toBeNull()
+    expect(container.querySelector('.set-video-shortcut')).toBeNull()
+  })
+
+  it('opens the form-video workflow from the active set row for resistance, timed and bodyweight sets', async () => {
+    const cases = [
+      exercise('plain-bench', [false]),
+      timedExercise('A'),
+      exercise('plain-pushup', [false], { target: { mode: 'reps', reps: 8, weight: 0, bodyweight: true } }),
+    ]
+    for (const entry of cases) {
+      await mount([entry])
+      const shortcut = container.querySelector('.set-video-shortcut')
+      expect(shortcut).toBeTruthy()
+      expect(shortcut.getAttribute('aria-label')).toBe('Film Set 1')
+      await click(shortcut)
+      expect(filmMocks.filmSetSheet).toHaveBeenLastCalledWith({ entry: 0, set: 0 }, 'Film Set 1')
+      await unmount()
+    }
+  })
+
+  it('opens an existing clip from the row shortcut and leaves re-recording explicit in the player', async () => {
+    const bench = exercise('plain-bench', [false])
+    bench.sets[0].media = [ref]
+    await mount([bench])
+    const shortcut = container.querySelector('.set-video-shortcut')
+    expect(shortcut.getAttribute('aria-label')).toBe('Watch your video')
+    await click(shortcut)
+    expect(container.querySelector('.fv-inline').getAttribute('data-hash')).toBe(HASH)
+    expect(filmMocks.filmSetSheet).not.toHaveBeenCalled()
+  })
 
   it('the set menu films the set, from the visible rows', async () => {
     await mount([exercise('plain-bench', [true, false])])
@@ -3820,4 +3910,3 @@ describe('a set\'s own form video (v1.4.4)', () => {
     expect(container.querySelector('.fv-inline').getAttribute('data-hash')).toBe(HASH)
   })
 })
-

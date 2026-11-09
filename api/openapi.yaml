@@ -4325,6 +4325,15 @@ components:
         width: { type: integer, minimum: 1, maximum: 16384 }
         height: { type: integer, minimum: 1, maximum: 16384 }
         dur: { type: number, minimum: 0, maximum: 3600, description: 'Seconds, one decimal; videos and animated GIFs, absent when unknown.' }
+        trim:
+          type: object
+          description: >-
+            Optional, non-destructive playback range for a video. The original file and its hash
+            are unchanged. Absent means the full video; a full-range selection is omitted.
+          required: [startSec, endSec]
+          properties:
+            startSec: { type: number, minimum: 0, description: Playback start in seconds. }
+            endSec: { type: number, exclusiveMinimum: 0, description: Playback end in seconds, no later than dur. }
         codec: { type: string, enum: [avc1, hvc1, av01, vp09, vp8, vp9, other], description: Videos only. }
         poster:
           type: object

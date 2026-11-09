@@ -43,6 +43,10 @@ const MAX_SIZE = 200 * MB
 const MAX_EDGE = 16384
 const MAX_DUR = 3600
 const MAX_URL = 2048
+// MediaRef.dur is stored to 0.1 s. A 0.05 s allowance prevents that rounding from rejecting
+// an end point at the source video's actual end; accepted values are clamped back to dur.
+export const TRIM_DURATION_EPSILON_SEC = 0.05
+const TRIM_PRECISION = 1000
 
 const intIn = (v, lo, hi) => Number.isInteger(v) && v >= lo && v <= hi
 
@@ -71,6 +75,11 @@ export function normalizeMediaRef(ref) {
     if (typeof ref.dur !== 'number' || !Number.isFinite(ref.dur) || ref.dur < 0 || ref.dur > MAX_DUR) return null
     out.dur = Math.round(ref.dur * 10) / 10
   }
+  if (out.kind === 'video' && ref.trim != null) {
+    const trim = normalizeTrimRange(ref.trim, out.dur)
+    // A whole-file range is the legacy representation: no `trim` means play the full source.
+    if (trim && !(trim.startSec === 0 && trim.endSec === out.dur)) out.trim = trim
+  }
   if (ref.codec != null) {
     if (ref.kind !== 'video' || !CODECS.includes(ref.codec)) return null
     out.codec = ref.codec
@@ -80,6 +89,22 @@ export function normalizeMediaRef(ref) {
   out.at = typeof ref.at === 'number' && Number.isFinite(ref.at) && ref.at > 0 ? Math.round(ref.at) : 0
   if (ref.local === true) out.local = true
   return out
+}
+
+/** A validated, millisecond-precision video range, or null when invalid / duration is unknown.
+ *  The duration tolerance only accounts for MediaRef.dur's one-decimal storage; the returned end
+ *  is clamped to that stored source duration. A full-range result is valid but should be omitted
+ *  by callers when serializing. */
+export function normalizeTrimRange(trim, durationSec) {
+  if (!trim || typeof trim !== 'object' || Array.isArray(trim)) return null
+  if (typeof durationSec !== 'number' || !Number.isFinite(durationSec) || durationSec <= 0) return null
+  const start = trim.startSec, rawEnd = trim.endSec
+  if (typeof start !== 'number' || !Number.isFinite(start) || start < 0) return null
+  if (typeof rawEnd !== 'number' || !Number.isFinite(rawEnd) || rawEnd <= start || rawEnd > durationSec + TRIM_DURATION_EPSILON_SEC) return null
+  const startSec = Math.round(start * TRIM_PRECISION) / TRIM_PRECISION
+  const endSec = Math.min(durationSec, Math.round(rawEnd * TRIM_PRECISION) / TRIM_PRECISION)
+  if (startSec >= endSec) return null
+  return { startSec, endSec }
 }
 
 /** The media of a custom exercise as it may be shown, or null. */

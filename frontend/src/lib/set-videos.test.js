@@ -4,8 +4,8 @@
 // kept and sent, and that nothing of it reaches a share card, Wrapped, a PDF or a CSV.
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import {
-  setVideosOf, setVideoOf, workoutSetVideos, setVideoCount, filmsLocally, filmSecCap, filmTarget,
-  attachSetVideo, detachSetVideo, removeSavedSetVideo, formVideosFor, defaultComparePair, toggleCompare,
+  setVideosOf, setVideoOf, setVideosInEntry, workoutSetVideos, setVideoCount, filmsLocally, filmSecCap, filmTarget,
+  attachSetVideo, detachSetVideo, removeSavedSetVideo, updateSavedSetVideoTrim, replaceSavedSetVideo, formVideosFor, defaultComparePair, toggleCompare,
   SET_VIDEO_MAX, WORKOUT_SET_VIDEOS_MAX, PHONE_VIDEO_SEC
 } from './set-videos.js'
 import { normalizeMediaRef, referencedHashes, keptHashes, referencedFiles, uploadableFiles, stateMediaRefs } from './media-refs.js'
@@ -38,6 +38,20 @@ const activeState = () => ({
 const saved = (id, d, start, sets, exId = '0043') => ({ id, d, start, end: start + 3600e3, name: 'Legs', entries: [{ id: exId, target: { sets: sets.length, reps: 5 }, sets }] })
 
 describe('a set video on the session in progress', () => {
+  it('lists every valid video-bearing set in the selected historical entry in set order', () => {
+    const entry = { id: '0043', sets: [
+      { w: 1, r: 1 },
+      { sec: 30, done: true, media: [video(A, { local: true })] },
+      { sec: 45, done: true, media: [photo(B)] },
+      { sec: 60, done: true, media: [video(C)] },
+    ] }
+    expect(setVideosInEntry(entry)).toEqual([
+      { set: 1, row: entry.sets[1], m: normalizeMediaRef(video(A, { local: true })) },
+      { set: 3, row: entry.sets[3], m: normalizeMediaRef(video(C)) },
+    ])
+    expect(setVideosInEntry(null)).toEqual([])
+  })
+
   it('attaches to the set, replaces the one there, and comes off again', () => {
     const S = activeState()
     expect(attachSetVideo(S, { entry: 0, set: 1 }, video(A))).toBe('added')
@@ -104,9 +118,9 @@ describe('where a video is kept', () => {
 describe('saved workouts', () => {
   it('Finish keeps the video on its set; a copied set does not bring it along', () => {
     const S = activeState()
-    attachSetVideo(S, { entry: 0, set: 1 }, video(A))
+    attachSetVideo(S, { entry: 0, set: 1 }, video(A, { trim: { startSec: 1.2, endSec: 4.8 } }))
     const w = buildCompletedWorkout(S.active, { end: 99 })
-    expect(setVideoOf(w.entries[0].sets[1]).hash).toBe(A)
+    expect(setVideoOf(w.entries[0].sets[1])).toMatchObject({ hash: A, trim: { startSec: 1.2, endSec: 4.8 } })
     const copied = copyRowAt(S.active.entries[0].sets, 1)
     expect(copied).toHaveLength(4)
     expect('media' in copied[2]).toBe(false)
@@ -122,6 +136,29 @@ describe('saved workouts', () => {
     expect('media' in S.workouts[0].entries[0].sets[0]).toBe(false)
     expect(S.workouts[0]._ts).toBe(50)
     expect(removeSavedSetVideo(S, { id: 'gone' }, A)).toBe(false)
+  })
+  it('updates only the saved video trim, stamps the workout and keeps a local-only file reference', () => {
+    const original = video(A, { local: true })
+    const w = saved('w-trim', '2026-10-20', 1000, [{ w: 100, r: 5, done: true, media: [original] }])
+    const S = { workouts: [w] }
+    expect(updateSavedSetVideoTrim(S, w, { entry: 0, set: 0, hash: A }, { startSec: 1.25, endSec: 4.5 }, 77)).toBe(true)
+    expect(S.workouts[0].entries[0].sets[0].media[0]).toMatchObject({ hash: A, local: true, trim: { startSec: 1.25, endSec: 4.5 } })
+    expect(S.workouts[0]._ts).toBe(77)
+    expect(updateSavedSetVideoTrim(S, w, { entry: 0, set: 0, hash: A }, { startSec: 2, endSec: 2 }, 88)).toBe(false)
+    expect(S.workouts[0]._ts).toBe(77)
+    expect(updateSavedSetVideoTrim(S, w, { entry: 0, set: 0, hash: A }, { startSec: 0, endSec: 8.4 }, 99)).toBe(true)
+    expect(S.workouts[0].entries[0].sets[0].media[0].trim).toBeUndefined()
+    expect(S.workouts[0].entries[0].sets[0].media[0].hash).toBe(A)
+  })
+  it('replaces a saved video with the new physical-file reference and preserves local-only', () => {
+    const original = video(A, { local: true, trim: { startSec: 1, endSec: 4 } })
+    const w = saved('w-replace-physical', '2026-10-18', 1000, [{ w: 100, r: 5, done: true, media: [original] }])
+    const S = { workouts: [w] }
+    const next = video(B, { dur: 5, size: 123456 })
+    expect(replaceSavedSetVideo(S, w, { entry: 0, set: 0, hash: A }, next, 77)).toBe(true)
+    expect(S.workouts[0].entries[0].sets[0].media).toEqual([{ ...next, local: true }])
+    expect(S.workouts[0]._ts).toBe(77)
+    expect(replaceSavedSetVideo(S, w, { entry: 0, set: 0, hash: A }, next, 88)).toBe(false)
   })
   it('a backup brings set videos back only where they pass the same checks', () => {
     const state = { workouts: [saved('w1', '2026-10-20', 1, [{ w: 1, r: 1, media: [{ hash: 'nope' }, video(A), video(B)] }, { w: 1, r: 1, media: [photo(C)] }])] }

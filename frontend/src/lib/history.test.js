@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { nextTrainingDay, modeOf, isTimed, fmtSec, setLabel, defaultConfig, pickedExerciseConfig, buildSets, freestyleConfig, exLine, workoutVolume, bestWeightFor, bestWeightForEntry, completedRepsOf, metricRowsForEntry, effortOf, stepEffort, capEffort, isBw, isPerSide, sideReps, repStep, cascadeWeight, insertWarmupRow, makeWarmupAt, canBeWarmup, makeWorkAt, removeRowAt, removeLastSet, setSpanAt, workSetsDone, setsDone, setsDoneActive, setUnits, doneUnits, setUnitsTotal, pairAdjacent, unpairSuperset, supersetUnits, sessionSections, applyIntensifierPlan, pinnedNoteFor, exNoteFor, effectiveRoutineIds, effectiveRoutines, effectiveRoutineId, effectiveRoutine, lastEntryFor, entryExcluded, entryRoutineId, setsRepsOf } from './history.js'
+import { nextTrainingDay, modeOf, isTimed, fmtSec, setLabel, defaultConfig, pickedExerciseConfig, buildSets, freestyleConfig, exLine, workoutVolume, bestWeightFor, bestWeightForEntry, completedRepsOf, metricRowsForEntry, effortOf, stepEffort, capEffort, isBw, isPerSide, sideReps, repStep, cascadeWeight, insertWarmupRow, makeWarmupAt, canBeWarmup, makeWorkAt, removeRowAt, removeLastSet, setSpanAt, workSetsDone, setsDone, setsDoneActive, setUnits, doneUnits, setUnitsTotal, pairAdjacent, unpairSuperset, supersetUnits, sessionSections, applyIntensifierPlan, pinnedNoteFor, exNoteFor, effectiveRoutineIds, effectiveRoutines, effectiveRoutineId, effectiveRoutine, lastEntryFor, lastWorkoutEntryFor, entryExcluded, entryRoutineId, setsRepsOf } from './history.js'
 import { makeSideSet, setSideField, toggleSide, WEIGHT_ORIGIN_MANUAL } from './workout-model.js'
 import { EXDB } from './exercises.js'
 import { todayISO, isoOf } from './format.js'
@@ -1435,6 +1435,11 @@ describe('lastEntryFor / buildSets skip a noProg entry', () => {
   const LIFT2 = EXDB.find(e => e.bp !== 'cardio' && e.eq !== 'body weight').id
   const wk = (d, w, r, extra) => ({ d, entries: [{ id: LIFT2, target: { sets: 1, reps: r, weight: w }, sets: [{ w, r, done: true }], ...extra }] })
 
+  it('has no selected workout before the exercise has a completed work set', () => {
+    expect(lastWorkoutEntryFor({ workouts: [] }, LIFT2)).toBeNull()
+    expect(lastWorkoutEntryFor({ workouts: [wk('2026-01-01', 60, 8, { sets: [{ w: 60, r: 8, done: false }] })] }, LIFT2)).toBeNull()
+  })
+
   it('lastEntryFor returns the prior counting session, not a later noProg one', () => {
     const S = { workouts: [wk('2026-01-01', 60, 8), wk('2026-01-05', 30, 12, { noProg: true })] }
     expect(lastEntryFor(S, LIFT2).d).toBe('2026-01-01')
@@ -1442,6 +1447,13 @@ describe('lastEntryFor / buildSets skip a noProg entry', () => {
   it('lastEntryFor skips a legacy whole-workout excludeFromProgression session', () => {
     const S = { workouts: [wk('2026-01-01', 60, 8), { d: '2026-01-05', excludeFromProgression: true, entries: [{ id: LIFT2, target: { sets: 1, reps: 12, weight: 30 }, sets: [{ w: 30, r: 12, done: true }] }] }] }
     expect(lastEntryFor(S, LIFT2).d).toBe('2026-01-01')
+  })
+  it('returns the selected historical workout and entry for related media without changing lastEntryFor', () => {
+    const old = wk('2026-01-01', 60, 8)
+    const ignored = wk('2026-01-05', 30, 12, { noProg: true })
+    const S = { workouts: [old, ignored] }
+    expect(lastWorkoutEntryFor(S, LIFT2)).toMatchObject({ workout: old, entry: old.entries[0], d: old.d })
+    expect(lastEntryFor(S, LIFT2)).toEqual({ d: old.d, sets: old.entries[0].sets, target: old.entries[0].target })
   })
   it('buildSets seeds opening rows from the last counting session', () => {
     const S = { exWeights: {}, workouts: [wk('2026-01-01', 60, 8), wk('2026-01-05', 30, 12, { noProg: true })] }
@@ -1478,6 +1490,8 @@ describe('routine slots: lastEntryFor / buildSets read the routine\'s own histor
     expect(lastEntryFor(S, LIFT3, 'A')).toMatchObject({ d: '2026-01-01', rid: 'A' })
     expect(lastEntryFor(S, LIFT3, 'B')).toMatchObject({ d: '2026-01-03', rid: 'B' })
     expect(lastEntryFor(S, LIFT3).d).toBe('2026-01-03')
+    expect(lastWorkoutEntryFor(S, LIFT3, 'A').workout.d).toBe('2026-01-01')
+    expect(lastWorkoutEntryFor({ ...S, lastFrom: 'any' }, LIFT3, 'A').workout.d).toBe('2026-01-03')
   })
 
   it('falls back to the exercise\'s last session for a routine that never trained it', () => {

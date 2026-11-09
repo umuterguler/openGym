@@ -44,6 +44,8 @@ describe('merging an exercise into another (#656)', () => {
 
   test('all history, plans and settings move to the target, and the custom source is gone', () => {
     const S = state()
+    const formVideo = { kind: 'video', hash: 'a'.repeat(64), mime: 'video/mp4', size: 1000, width: 720, height: 1280, dur: 8.4, local: true, trim: { startSec: 1.2, endSec: 4.8 } }
+    S.workouts[0].entries[0].sets[0].media = [formVideo]
     registerCustom(S.customEx)
     mergeExercise(S, CUSTOM, BENCH, { now: 1000 })
     const ids = S.workouts.flatMap(w => w.entries.map(e => e.id))
@@ -52,6 +54,7 @@ describe('merging an exercise into another (#656)', () => {
     expect(S.workouts[0].entries[0].muscleSnapshot).toBeUndefined()
     expect(S.workouts[0].entries[0].n).toBeUndefined()
     expect(S.workouts[0].prs).toEqual([BENCH])
+    expect(S.workouts[0].entries[0].sets[0].media[0]).toEqual(formVideo)
     // workouts it changed are stamped, the others are not
     expect(S.workouts[0]._ts).toBe(1000)
     expect(S.workouts[2]._ts).toBeUndefined()

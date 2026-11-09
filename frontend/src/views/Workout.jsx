@@ -10,7 +10,7 @@ import { EXIDX, exOr, betterWeight, isAssisted } from '../lib/exercises.js'
 import { bestsFor, lastRowFor, oddValues } from '../lib/typo-check.js'
 import { usesBar } from '../lib/bar.js'
 import { loadKindFor, baseWeightFor, inventoryFor, rowLoad, sameLoad, plateDelta, dropGrid } from '../lib/plates.js'
-import { effectiveRoutines, effectiveRoutineIds, lastEntryFor, bestWeightFor, bestWeightForEntry, freestyleConfig, pickedExerciseConfig, setsDoneActive, setUnitsTotal, supersetUnits, unitOf, setLabel, modeOf, isBw, isPerSide, repStep, EFFORT, effortOf, stepEffort, capEffort, cascadeWeight, liveReramp, insertWarmupRow, barFloor, makeWarmupAt, canBeWarmup, makeWorkAt, removeRowAt, removeLastSet, setSpanAt, copyRowAt, copySpanAt, insertRowAt, pairAdjacent, unpairSuperset, cleanupSg, applyIntensifierPlan, pinnedNoteFor, exNoteFor, setsRepsOf, sessionVolume } from '../lib/history.js'
+import { effectiveRoutines, effectiveRoutineIds, lastEntryFor, lastWorkoutEntryFor, bestWeightFor, bestWeightForEntry, freestyleConfig, pickedExerciseConfig, setsDoneActive, setUnitsTotal, supersetUnits, unitOf, setLabel, modeOf, isBw, isPerSide, repStep, EFFORT, effortOf, stepEffort, capEffort, cascadeWeight, liveReramp, insertWarmupRow, barFloor, makeWarmupAt, canBeWarmup, makeWorkAt, removeRowAt, removeLastSet, setSpanAt, copyRowAt, copySpanAt, insertRowAt, pairAdjacent, unpairSuperset, cleanupSg, applyIntensifierPlan, pinnedNoteFor, exNoteFor, setsRepsOf, sessionVolume } from '../lib/history.js'
 import { cleanNum, fmtNum, fmtPlate, fmtVol, exerciseNameText, fmtDate, fmtDaysAgo, todayISO, exCount, DAYN } from '../lib/format.js'
 import { speedUnitOf, toSpeed, fromSpeed } from '../lib/speed.js'
 import { clampIncline, hasIncline, inclineFits, inclineFrom, INCLINE_STEP } from '../lib/incline.js'
@@ -23,8 +23,8 @@ import { insertionIndexAfterCurrentUnit, nextUnfinishedUnit, setProgressHighWate
 import Media from '../components/Media.jsx'
 import WorkoutScrollAnchor from '../components/WorkoutScrollAnchor.jsx'
 import WorkoutChips from '../components/WorkoutChips.jsx'
-import { filmSetSheet, SetVideoBadge, ActiveSetVideo } from '../components/SetVideo.jsx'
-import { setVideoOf, filmTarget } from '../lib/set-videos.js'
+import { filmSetSheet, SetVideoBadge, ActiveSetVideo, FormVideoPlayer } from '../components/SetVideo.jsx'
+import { setVideoOf, setVideosInEntry, filmTarget } from '../lib/set-videos.js'
 import { fmtClip } from '../lib/media-refs.js'
 import { supersetMeta } from '../lib/superset-meta.js'
 import WorkoutThumb, { hasWorkoutMedia } from '../components/WorkoutThumb.jsx'
@@ -155,6 +155,8 @@ function ExerciseBlock({ entryIdx, compact, dense, editing, onToggle, onToggleSi
   const entry = S.active.entries[entryIdx]
   // The set whose form video plays under its row (SetVideo.jsx), by index; one at a time.
   const [videoAt, setVideoAt] = useState(null)
+  const [previousVideosOpen, setPreviousVideosOpen] = useState(false)
+  const [previousVideoKey, setPreviousVideoKey] = useState(null)
   // Rows are keyed by index: one added or removed above would put the player under another set.
   const rowCount = entry?.sets?.length
   useEffect(() => { setVideoAt(null) }, [rowCount])
@@ -252,7 +254,8 @@ function ExerciseBlock({ entryIdx, compact, dense, editing, onToggle, onToggleSi
   const H = sessionHistory(S)
   // The routine's own last session of this exercise (or any, for a routine that has none), the
   // same one the rows and the progression line were built from (#216).
-  const last = lastEntryFor(H, entry.id, entry.rid)
+  const previous = lastWorkoutEntryFor(H, entry.id, entry.rid)
+  const last = previous
   // Each finished set against the same set last time (#907, lib/set-trend.js): a small arrow on
   // the set's number, said in words to a screen reader. Settings → Workout can switch it off.
   const trends = setTrendOn(S) ? setTrendsFor(entry, last, { formula: formulaOf(S) }) : null
@@ -473,12 +476,33 @@ function ExerciseBlock({ entryIdx, compact, dense, editing, onToggle, onToggleSi
   const backups = (entry.target?.subs || []).map(id => EXIDX[id]).filter(b => b && b.id !== entry.id)
   // Form videos are a module (Settings → Modules): off, nothing offers to film; filmed ones stay.
   const videosOn = isOn(S, 'videos')
+  const previousVideos = videosOn && !editing ? setVideosInEntry(previous?.entry) : []
+  const previousWorkoutKey = previous?.workout?.id || previous?.workout?.d || ''
+  const previousVideoLabel = v => `${fmtDate(previous.d, true, true)} · ${isWarmupRow(v.row) ? t('Warm-up') : t('Set {0}', setNumberAt(previous.entry.sets, v.set))} · ${setLabel(entry.id, v.row, previous.entry.target, speedUnitOf(S))}`
+  const selectedPreviousVideo = previousVideos.find(v => `${v.set}:${v.m.hash}` === previousVideoKey)
+  useEffect(() => {
+    setPreviousVideosOpen(false)
+    setPreviousVideoKey(null)
+  }, [entry.id, entry.rid, previousWorkoutKey])
   const filmAt = videosOn ? filmTarget(entry) : -1
   const setTitle = (s, i) => isWarmupRow(s) ? t('Warm-up') : sideTagOf(s) ? t('Set {0} ({1})', setNumOf(s, i), sideTagOf(s)) : t('Set {0}', setNumOf(s, i))
   // A timed per-side hold is one set over two rows; its video sits on the first of them.
   const filmSet = i => {
     const at = setSpanAt(entry.sets, i)[0]
     filmSetSheet({ entry: entryIdx, set: at }, t('Film {0}', setTitle(entry.sets[at], at)))
+  }
+  // One-tap access from each live set row. If a clip already exists, the shortcut opens it;
+  // re-recording stays an explicit action inside that player's controls.
+  const setVideoShortcut = i => {
+    if (!videosOn || editing) return null
+    const at = setSpanAt(entry.sets, i)[0]
+    if (at !== i) return null // timed left/right rows share one video and one shortcut
+    const video = setVideoOf(entry.sets[at])
+    const label = video ? t('Watch your video') : t('Film {0}', setTitle(entry.sets[at], at))
+    return <button type="button" className="set-video-shortcut" aria-label={label} title={label}
+      onClick={() => video ? setVideoAt(videoAt === at ? null : at) : filmSet(at)}>
+      <Icon name={video ? 'play' : 'camera'} />
+    </button>
   }
   const openMore = () => menuSheet({
     title: exerciseNameFor(ex),
@@ -742,6 +766,7 @@ function ExerciseBlock({ entryIdx, compact, dense, editing, onToggle, onToggleSi
           set off itself. The checkbox stays for anyone who timed it on their own watch. */}
       {timed && !editing && <button className="setgo" aria-label={t('Start set')} disabled={s.done || !!working}
         onClick={() => onStartTimed(i)}><Icon name="play" /></button>}
+      {setVideoShortcut(i)}
       <Check checked={s.done} tour="tick" label={sideTagOf(s) ? t('Set {0} ({1}) done', setNumOf(s, i), sideTagOf(s)) : t('Set {0} done', setNumOf(s, i))} onChange={() => onToggle(i)} />
     </div>
   )
@@ -820,6 +845,28 @@ function ExerciseBlock({ entryIdx, compact, dense, editing, onToggle, onToggleSi
     {entry.note && <div className="exnote">{entry.note}</div>}
     {planLine}
     {refLine}
+    {previousVideos.length > 0 && <div className="fv-section fv-previous">
+      <button type="button" className="fv-badge" aria-expanded={previousVideosOpen}
+        onClick={() => { setPreviousVideosOpen(open => !open); if (previousVideosOpen) setPreviousVideoKey(null) }}>
+        <Icon name="camera" />
+        <span>{t('Last time')} · {t('Form videos')} ({previousVideos.length})</span>
+        <Icon name={previousVideosOpen ? 'chevronUp' : 'chevronDown'} />
+      </button>
+      {previousVideosOpen && <>
+        <div className="row fv-pick fv-previous-list">
+          {previousVideos.map(v => {
+            const key = `${v.set}:${v.m.hash}`
+            return <button key={key} type="button" className={'chip' + (key === previousVideoKey ? ' on' : '')}
+              aria-pressed={key === previousVideoKey} onClick={() => setPreviousVideoKey(key)}>
+              {previousVideoLabel(v)}
+            </button>
+          })}
+        </div>
+        {selectedPreviousVideo && <div className="fv-inline">
+          <FormVideoPlayer m={selectedPreviousVideo.m} label={previousVideoLabel(selectedPreviousVideo)} compact />
+        </div>}
+      </>}
+    </div>}
     {guidance && onProgressionSettings && <button type="button" className={'progline' + (plan.kind === 'deload' ? ' warn' : '')}
       aria-label={t('Open exercise settings')} onClick={onProgressionSettings}>
       <Icon name={plan.kind === 'up' ? 'arrowUp' : plan.kind === 'deload' || plan.prog?.deload ? 'arrowDown' : plan.kind === 'programme' ? 'calendar' : 'lightbulb'} />
@@ -829,7 +876,7 @@ function ExerciseBlock({ entryIdx, compact, dense, editing, onToggle, onToggleSi
     <div className="card" style={{ marginTop: 10, marginBottom: 0 }}>
       {/* the header carries the same eff3/timed sizing as the rows, or the labels drift off their
           columns; over L/R rows it also has to skip the side badge that sits in front of the weight cell */}
-      <div className={'sethead' + (col3 ? ' eff3' : '') + (timed ? ' timed' : '') + (perSide ? ' per-side' : '') + (wc.steppers ? '' : ' plain')}><span className="n-sp" /><span className="w-sp">{col1.hd}</span>{col2 && <span className="r-sp">{col2.hd}</span>}{col3 && <span className={col3.eff ? 'eff-sp' : 'r-sp'}>{col3.hd}</span>}{timed && <span className="ck-sp" />}<span className="ck-sp" /></div>
+      <div className={'sethead' + (col3 ? ' eff3' : '') + (timed ? ' timed' : '') + (perSide ? ' per-side' : '') + (wc.steppers ? '' : ' plain')}><span className="n-sp" /><span className="w-sp">{col1.hd}</span>{col2 && <span className="r-sp">{col2.hd}</span>}{col3 && <span className={col3.eff ? 'eff-sp' : 'r-sp'}>{col3.hd}</span>}{timed && <span className="ck-sp" />}{videosOn && !editing && !perSide && <span className="set-video-spacer" />}<span className="ck-sp" />{videosOn && !editing && perSide && <span className="set-video-spacer" />}</div>
       <span id={optsId} className="vh">{t('Options: copy, remove')}</span>
       {entry.sets.map((s, i) => {
         const warm = isWarmupRow(s)
@@ -864,6 +911,7 @@ function ExerciseBlock({ entryIdx, compact, dense, editing, onToggle, onToggleSi
                 {sideRow(s, i, 'R', col1, col2, col3)}
                 {sideExtras(s, i, 'R')}
               </div>
+              {setVideoShortcut(i)}
             </div>
           ) : pairHead ? <>{plainRow(s, i)}{plainRow(entry.sets[i + 1], i + 1)}</> : plainRow(s, i))}
           {swipeHint && swipeHint.i === i && swipeOn && <div className="swhint">

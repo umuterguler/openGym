@@ -17,6 +17,8 @@ import { useStore } from '../store/useStore.js'
 import { useUI } from '../store/useUI.js'
 import { t } from '../lib/i18n.js'
 import { fmtClip } from '../lib/media-refs.js'
+import { fmtMB, MB } from '../lib/media-limits.js'
+import { bindVideoTrim, restartVideoInTrim, seekVideoInTrim, trimPlaybackState } from '../lib/video-trim.js'
 import { limitsFrom } from '../lib/media-limits.js'
 import { setLabel } from '../lib/history.js'
 import { speedUnitOf } from '../lib/speed.js'
@@ -24,10 +26,13 @@ import { exOr } from '../lib/exercises.js'
 import { fmtDate, exerciseNameText } from '../lib/format.js'
 import {
   attachSetVideo, detachSetVideo, removeSavedSetVideo, filmsLocally, filmSecCap, formVideosFor,
-  defaultComparePair, toggleCompare, WORKOUT_SET_VIDEOS_MAX
+  defaultComparePair, toggleCompare, updateSavedSetVideoTrim, replaceSavedSetVideo, WORKOUT_SET_VIDEOS_MAX
 } from '../lib/set-videos.js'
 import { useMediaPicker } from './CustomMediaField.jsx'
 import { useMediaUrl, CustomThumb } from './CustomMedia.jsx'
+import VideoTrimEditor from './VideoTrimEditor.jsx'
+import InAppVideoRecorder from './InAppVideoRecorder.jsx'
+import { nativeVideoAvailable, tempVideoUrl, trimTempVideo, deleteTempVideo, stageSavedVideoForTrim, exportSavedVideoToGallery } from '../lib/native-video-media.js'
 import { Button, Row, Switch } from './ui.jsx'
 import Icon from './Icon.jsx'
 import { isOn } from '../lib/modules.js'
@@ -42,6 +47,27 @@ const mute = el => {
   el.muted = true
   el.defaultMuted = true
   el.setAttribute('muted', '')
+}
+
+function TrimTimeline({ trim, videoRef, sourceKey }) {
+  const [sourceTime, setSourceTime] = useState(trim?.startSec ?? 0)
+  useEffect(() => {
+    const video = videoRef.current
+    if (!video) return undefined
+    const sync = () => setSourceTime(video.currentTime)
+    const events = ['timeupdate', 'seeking', 'seeked', 'loadedmetadata', 'durationchange']
+    events.forEach(name => video.addEventListener(name, sync))
+    sync()
+    return () => events.forEach(name => video.removeEventListener(name, sync))
+  }, [videoRef, sourceKey, trim?.startSec, trim?.endSec])
+  const clock = trimPlaybackState(sourceTime, trim)
+  if (!clock) return null
+  return <div className="fv-clip-timeline">
+    <input type="range" min="0" max={clock.duration} step="0.01" value={clock.position}
+      aria-label={t('Video position')} aria-valuetext={`${fmtClip(clock.position)} / ${fmtClip(clock.duration)}`}
+      onChange={ev => seekVideoInTrim(videoRef.current, Number(ev.target.value), trim)} />
+    <div className="fv-clip-clock" dir="ltr"><span>{fmtClip(clock.position)}</span><span>{fmtClip(clock.duration)}</span></div>
+  </div>
 }
 
 /* ------------------------------------------------------------------ filming ------------- */
@@ -62,6 +88,7 @@ function FilmSetSheet({ at, title, close }) {
   const { pick, busy, warning, note, storable } = useMediaPicker()
   const cam = useRef(null)
   const lib = useRef(null)
+  const androidRecorder = nativeVideoAvailable()
   const sec = filmSecCap(limitsFrom(config))
   const local = filmsLocally(S, user, config)
   // The switch only means something where the videos would otherwise go up.
@@ -78,17 +105,73 @@ function FilmSetSheet({ at, title, close }) {
     const got = await pick(file)
     if (!got) return
     if (got.kind !== 'video') { toast(t('That’s a photo. Pick a video for a set.')); return }
-    let res
-    update(s => { res = attachSetVideo(s, at, got, { local: filmsLocally(s, user, config) }) })
-    if (res === 'added' || res === 'replaced') { toast(t('Video saved with this set')); close() }
-    else if (res === 'full') toast(t('Up to {0} set videos per workout.', WORKOUT_SET_VIDEOS_MAX))
-    else { toast(t('That set is gone.')); close() }
+    openSheet(closeTrim => <VideoTrimEditor m={got} title={t('Trim video')} onCancel={closeTrim}
+      onSave={trim => {
+        let res
+        update(s => { res = attachSetVideo(s, at, trim ? { ...got, trim } : got, { local: filmsLocally(s, user, config) }) })
+        closeTrim()
+        if (res === 'added' || res === 'replaced') { toast(t('Video saved with this set')); close() }
+        else if (res === 'full') toast(t('Up to {0} set videos per workout.', WORKOUT_SET_VIDEOS_MAX))
+        else { toast(t('That set is gone.')); close() }
+      }} />)
+  }
+
+  const openTrimForRecording = async source => {
+    const sourceUrl = await tempVideoUrl(source.path)
+    let processedOutput = null
+    let processedRange = null
+    openSheet(closeTrim => <VideoTrimEditor
+      m={{ kind: 'video', mime: source.mimeType, size: source.size, width: source.width, height: source.height, dur: source.durationMs / 1000 }}
+      sourceUrl={sourceUrl} physicalRecording title={t('Trim video')}
+      onCancel={async () => {
+        await deleteTempVideo(source.path).catch(() => {})
+        if (processedOutput?.path && processedOutput.path !== source.path) await deleteTempVideo(processedOutput.path).catch(() => {})
+        closeTrim()
+      }}
+      onSave={async trim => {
+        let output = source
+        // A full MP4 may be ingested as-is. Every selected range, and any full WebM fallback, is
+        // physically exported as MP4 by Media3 before the normal hash/store pipeline sees it.
+        if (trim || source.mimeType !== 'video/mp4') {
+          const range = trim ? `${trim.startSec}:${trim.endSec}` : `0:${source.durationMs}`
+          if (!processedOutput || processedRange !== range) {
+            if (processedOutput?.path && processedOutput.path !== source.path) await deleteTempVideo(processedOutput.path).catch(() => {})
+            processedOutput = await trimTempVideo(source.path, trim?.startSec ?? 0, trim?.endSec ?? source.durationMs / 1000)
+            processedRange = range
+          }
+          output = processedOutput
+        }
+        const url = await tempVideoUrl(output.path)
+        const response = await fetch(url)
+        if (!response.ok) throw new Error('trimmed video could not be read')
+        const blob = await response.blob()
+        const file = new File([blob], `opengym-${Date.now()}.mp4`, { type: output.mimeType || 'video/mp4' })
+        const got = await pick(file)
+        if (!got) throw new Error('video ingest failed')
+        let result
+        update(s => { result = attachSetVideo(s, at, got, { local: filmsLocally(s, user, config) }) })
+        if (result !== 'added' && result !== 'replaced') throw new Error(result === 'full' ? t('Up to {0} set videos per workout.', WORKOUT_SET_VIDEOS_MAX) : t('That set is gone.'))
+        // Source and processed scratch output are removed only after the MediaRef and bytes have
+        // both been stored and the workout set now points at them.
+        await deleteTempVideo(source.path).catch(() => {})
+        if (output.path !== source.path) await deleteTempVideo(output.path).catch(() => {})
+        if (processedOutput?.path && processedOutput.path !== source.path && processedOutput.path !== output.path) {
+          await deleteTempVideo(processedOutput.path).catch(() => {})
+        }
+        closeTrim(); close()
+        toast(t('Saved video: {0} · {1} MB', fmtClip(got.dur || 0), fmtMB(got.size / MB)))
+      }} />)
   }
 
   return <div className="fv-sheet">
     <h3 style={{ marginBottom: 4 }}>{title}</h3>
     <div className="muted small" style={{ marginBottom: 12 }}>{t('Film from the side with your whole body in the frame. Up to {0} seconds.', sec)}</div>
     <div className="fv-film">
+      {androidRecorder && <Button variant="primary" icon="camera" disabled={!canAdd}
+        onClick={() => openSheet(closeRecord => <InAppVideoRecorder maxSeconds={sec}
+          onCancel={closeRecord}
+          onFallback={() => { closeRecord(); cam.current?.click() }}
+          onRecorded={source => { closeRecord(); return openTrimForRecording(source) }} />)}>{t('Record in OpenGym')}</Button>}
       <Button variant="primary" icon={busy ? undefined : 'camera'} disabled={!canAdd} onClick={() => cam.current?.click()}>
         {busy ? t('Loading…') : t('Record a video')}
       </Button>
@@ -124,14 +207,37 @@ const stageShape = m => {
  * One form video, playing: muted, looping, inline, with controls, 0.5x and full screen. `onRemove`
  * adds a Remove (asked once more), `onRefilm` a Film again. A video kept on another phone says so.
  */
-export function FormVideoPlayer({ m, label = '', onRemove, onRefilm, compact = false }) {
+export function FormVideoPlayer({ m, label = '', onRemove, onRefilm, onEditTrim, onExportGallery, compact = false }) {
   const elsewhere = m.local === true
   const main = useMediaUrl(m, { auto: !elsewhere })
   const poster = useMediaUrl(m.poster || null, { auto: !elsewhere })
   const ref = useRef(null)
   const [rate, setRate] = useState(1)
+  const [playing, setPlaying] = useState(false)
+  const [muted, setMuted] = useState(true)
   const [asking, setAsking] = useState(false)
+  const [exporting, setExporting] = useState(false)
+  const editAllowed = useStore(s => isOn(s.S, 'videos'))
+  const trimClock = trimPlaybackState(m.trim?.startSec, m.trim)
+  const trimmed = !!trimClock
   useEffect(() => { if (ref.current) ref.current.playbackRate = rate }, [rate, main.url])
+  useEffect(() => bindVideoTrim(ref.current, m.trim, { loop: true }), [main.url, m.trim?.startSec, m.trim?.endSec])
+  useEffect(() => { setPlaying(false) }, [main.url])
+  const togglePlayback = () => {
+    const video = ref.current
+    if (!video) return
+    if (video.paused) {
+      const clock = trimPlaybackState(video.currentTime, m.trim)
+      if (!clock || video.currentTime < m.trim.startSec || video.currentTime >= m.trim.endSec) seekVideoInTrim(video, 0, m.trim)
+      video.play()?.catch?.(() => {})
+    } else video.pause()
+  }
+  const replay = () => {
+    const video = ref.current
+    if (!video) return
+    seekVideoInTrim(video, 0, m.trim)
+    video.play()?.catch?.(() => {})
+  }
   const full = () => {
     const v = ref.current
     if (!v) return
@@ -139,23 +245,49 @@ export function FormVideoPlayer({ m, label = '', onRemove, onRefilm, compact = f
     if (typeof v.requestFullscreen === 'function') v.requestFullscreen().catch(() => {})
     else if (typeof v.webkitEnterFullscreen === 'function') v.webkitEnterFullscreen()
   }
+  const exportGallery = async () => {
+    if (!onExportGallery || exporting) return
+    setExporting(true)
+    try {
+      const result = await onExportGallery()
+      toast(result?.alreadyExists ? t('This video is already in Gallery.') : t('Saved to Gallery.'))
+    } catch { toast(t('Could not save this video to Gallery. The video in OpenGym is safe.')) }
+    finally { setExporting(false) }
+  }
   const missing = !main.url && main.status !== 'loading'
-  return <div className={'fv-player' + (compact ? ' compact' : '')}>
+  return <div className={'fv-player' + (compact ? ' compact' : '') + (trimmed ? ' trimmed' : '')}>
     <div className="fv-stage" style={stageShape(m)}>
       {main.url
-        ? <video ref={el => { ref.current = el; mute(el); if (el) el.playbackRate = rate }} src={main.url} poster={poster.url || undefined}
-            playsInline autoPlay loop controls muted preload="auto" aria-label={label || t('Form video')} />
+        ? <video ref={el => {
+            ref.current = el
+            if (el) {
+              if (trimmed) { el.muted = muted; el.defaultMuted = muted }
+              else mute(el)
+              el.playbackRate = rate
+            }
+          }} src={main.url} poster={poster.url || undefined}
+            playsInline autoPlay loop={!trimmed} controls={!trimmed} muted={trimmed ? muted : true} preload="auto" aria-label={label || t('Form video')}
+            onPlay={() => setPlaying(true)} onPause={() => setPlaying(false)} onEnded={() => setPlaying(false)} />
         : poster.url ? <img src={poster.url} alt="" draggable={false} /> : <div className="fv-x"><Icon name="play" /></div>}
       {!main.url && <div className="fv-msg" onClick={() => { if (!elsewhere) main.load() }}>
         {elsewhere && missing ? t('On the phone that filmed it') : main.status === 'loading' ? t('Loading…') : main.status === 'offline' ? t('You’re offline. Try again once you’re back online.') : missing ? t('This video isn’t on this device') : null}
       </div>}
     </div>
+    {trimmed && main.url && <TrimTimeline trim={m.trim} videoRef={ref} sourceKey={main.url} />}
     <div className="fv-bar">
+      {trimmed && <>
+        <button type="button" className="iconbtn" aria-label={t('Replay')} title={t('Replay')} disabled={!main.url} onClick={replay}><Icon name="reset" /></button>
+        <button type="button" className="iconbtn" aria-label={playing ? t('Pause') : t('Play')} title={playing ? t('Pause') : t('Play')} disabled={!main.url} onClick={togglePlayback}><Icon name={playing ? 'pause' : 'play'} /></button>
+        <button type="button" className={'iconbtn fv-mute' + (muted ? ' is-muted' : '')} aria-label={muted ? t('Unmute') : t('Mute')} title={muted ? t('Unmute') : t('Mute')} aria-pressed={!muted} disabled={!main.url}
+          onClick={() => setMuted(v => !v)}><Icon name="speaker" /></button>
+      </>}
       <div className="fv-speed" role="group" aria-label={t('Playback speed')}>
         {[0.5, 1].map(r => <button key={r} type="button" className={'chip' + (rate === r ? ' on' : '')} aria-pressed={rate === r} onClick={() => setRate(r)} dir="ltr">{r === 0.5 ? '0.5×' : '1×'}</button>)}
       </div>
-      {m.dur != null && <span className="small dim" dir="ltr">{fmtClip(m.dur)}</span>}
+      {(trimClock || m.dur != null) && <span className="small dim" dir="ltr">{fmtClip(trimClock?.duration ?? m.dur)}</span>}
       <span style={{ flex: 1 }} />
+      {onEditTrim && editAllowed && main.url && <button type="button" className="chip" onClick={onEditTrim}>{t('Edit trim')}</button>}
+      {onExportGallery && main.url && <button type="button" className="chip" disabled={exporting} onClick={exportGallery}>{exporting ? t('Saving…') : t('Save to Gallery')}</button>}
       {onRefilm && <button type="button" className="iconbtn" aria-label={t('Film again')} title={t('Film again')} onClick={onRefilm}><Icon name="camera" /></button>}
       {onRemove && <button type="button" className="iconbtn" aria-label={t('Remove video')} title={t('Remove video')} onClick={() => setAsking(a => !a)}><Icon name="trash" /></button>}
       <button type="button" className="iconbtn" aria-label={t('Full screen')} title={t('Full screen')} disabled={!main.url} onClick={full}><Icon name="expand" /></button>
@@ -171,10 +303,11 @@ export function FormVideoPlayer({ m, label = '', onRemove, onRefilm, compact = f
 /** The small badge under a set row with a video: its length, and a tap that opens or closes the
  *  player right there. */
 export function SetVideoBadge({ m, open, onToggle }) {
+  const duration = trimPlaybackState(m.trim?.startSec, m.trim)?.duration ?? m.dur
   return <button type="button" className={'fv-badge' + (open ? ' on' : '')} aria-expanded={open} onClick={onToggle}>
     <Icon name="camera" />
     <span>{t('Form video')}</span>
-    {m.dur != null && <span className="dim" dir="ltr">{fmtClip(m.dur)}</span>}
+    {duration != null && <span className="dim" dir="ltr">{fmtClip(duration)}</span>}
     <Icon name={open ? 'chevronUp' : 'chevronDown'} />
   </button>
 }
@@ -182,9 +315,11 @@ export function SetVideoBadge({ m, open, onToggle }) {
 /** The player under a set of the session in progress, with Film again and Remove. */
 export function ActiveSetVideo({ m, at, label, refilmTitle }) {
   const update = useStore(s => s.update)
+  const exportAllowed = useStore(s => isOn(s.S, 'videos')) && nativeVideoAvailable()
   return <div className="fv-inline">
     <FormVideoPlayer m={m} label={label} compact
       onRefilm={() => filmSetSheet(at, refilmTitle)}
+      onExportGallery={exportAllowed ? () => exportSavedVideoToGallery(m) : undefined}
       onRemove={() => update(s => { detachSetVideo(s, at, m.hash) })} />
   </div>
 }
@@ -206,11 +341,86 @@ function openSavedVideo(it, exId) {
 }
 function SavedVideo({ it, exId, close }) {
   const S = useStore(s => s.S)
+  const { pick } = useMediaPicker()
   const update = useStore(s => s.update)
+  const exportGallery = async () => {
+    if (!nativeVideoAvailable() || !it.m.trim) return exportSavedVideoToGallery(it.m)
+    let staged = null, processed = null
+    try {
+      // A legacy non-destructive ref still points at the full source. Convert its currently
+      // visible range before exporting, and make that processed file the canonical MediaRef.
+      staged = await stageSavedVideoForTrim(it.m)
+      processed = await trimTempVideo(staged.path, it.m.trim.startSec, it.m.trim.endSec)
+      const response = await fetch(await tempVideoUrl(processed.path))
+      if (!response.ok) throw new Error('processed video could not be read')
+      const replacement = await pick(new File([await response.blob()], `opengym-export-${Date.now()}.mp4`, { type: 'video/mp4' }))
+      if (!replacement) throw new Error('processed video could not be stored')
+      let changed = false
+      update(s => { changed = replaceSavedSetVideo(s, it.w, { entry: it.entry, set: it.set, hash: it.m.hash }, replacement) })
+      if (!changed) throw new Error('saved video changed before migration')
+      try { const sync = await import('../lib/media-sync.js'); await sync.removeUnreferencedMedia([it.m.hash]) } catch { /* normal media GC can retry later */ }
+      await deleteTempVideo(staged.path).catch(() => {})
+      await deleteTempVideo(processed.path).catch(() => {})
+      const result = await exportSavedVideoToGallery(replacement)
+      close()
+      return result
+    } catch (error) {
+      if (staged?.path) await deleteTempVideo(staged.path).catch(() => {})
+      if (processed?.path) await deleteTempVideo(processed.path).catch(() => {})
+      throw error
+    }
+  }
+  const editTrim = isOn(S, 'videos') ? async () => {
+    if (!nativeVideoAvailable()) {
+      openSheet(closeEditor => <VideoTrimEditor m={it.m} title={t('Edit trim')} onCancel={closeEditor}
+        onSave={trim => {
+          update(s => { updateSavedSetVideoTrim(s, it.w, { entry: it.entry, set: it.set, hash: it.m.hash }, trim) })
+          closeEditor(); close(); toast(t('Trim saved'))
+        }} />)
+      return
+    }
+    let staged = null, processed = null, processedRange = null
+    try {
+      staged = await stageSavedVideoForTrim(it.m)
+      openSheet(closeEditor => <VideoTrimEditor m={it.m} title={t('Edit trim')} physicalRecording onCancel={async () => {
+        await deleteTempVideo(staged.path).catch(() => {})
+        if (processed?.path) await deleteTempVideo(processed.path).catch(() => {})
+        closeEditor()
+      }} onSave={async trim => {
+        // A full-range save keeps the existing canonical file. Any shortening is made from a
+        // scratch copy of the currently saved file and replaces the MediaRef only after ingest.
+        if (!trim) { closeEditor(); close(); return }
+        const range = `${trim.startSec}:${trim.endSec}`
+        if (!processed || processedRange !== range) {
+          if (processed?.path) await deleteTempVideo(processed.path).catch(() => {})
+          processed = await trimTempVideo(staged.path, trim.startSec, trim.endSec)
+          processedRange = range
+        }
+        const response = await fetch(await tempVideoUrl(processed.path))
+        if (!response.ok) throw new Error('processed video could not be read')
+        const blob = await response.blob()
+        const file = new File([blob], `opengym-edit-${Date.now()}.mp4`, { type: 'video/mp4' })
+        const replacement = await pick(file)
+        if (!replacement) throw new Error('processed video could not be stored')
+        let changed = false
+        update(s => { changed = replaceSavedSetVideo(s, it.w, { entry: it.entry, set: it.set, hash: it.m.hash }, replacement) })
+        if (!changed) throw new Error('saved video changed before the edit could be applied')
+        try { const sync = await import('../lib/media-sync.js'); await sync.removeUnreferencedMedia([it.m.hash]) } catch { /* normal media GC can retry later */ }
+        await deleteTempVideo(staged.path).catch(() => {})
+        await deleteTempVideo(processed.path).catch(() => {})
+        closeEditor(); close(); toast(t('Trim saved'))
+      }} />)
+    } catch {
+      if (staged?.path) await deleteTempVideo(staged.path).catch(() => {})
+      if (processed?.path) await deleteTempVideo(processed.path).catch(() => {})
+      toast(t('Could not save this video. The original is still safe; try again.'))
+    }
+  } : undefined
   return <>
     <h3 style={{ marginBottom: 2 }}>{fmtDate(it.d, true, true)}</h3>
     <div className="muted small" style={{ marginBottom: 10 }}>{exerciseNameText(exOr(exId))} · {itemLabel(it, exId, S)}</div>
-    <FormVideoPlayer m={it.m} label={fmtDate(it.d, true, true)}
+    <FormVideoPlayer m={it.m} label={fmtDate(it.d, true, true)} onEditTrim={editTrim}
+      onExportGallery={isOn(S, 'videos') && nativeVideoAvailable() ? exportGallery : undefined}
       onRemove={() => { update(s => { removeSavedSetVideo(s, it.w, it.m.hash) }); close() }} />
   </>
 }
@@ -274,7 +484,7 @@ export function CompareVideos({ pair, exId }) {
   const [paused, setPaused] = useState(false)
   const each = fn => refs.forEach(r => { if (r.current) fn(r.current) })
   useEffect(() => { each(v => { v.playbackRate = rate }) }, [rate])
-  const restart = () => each(v => { v.currentTime = 0; v.play()?.catch?.(() => {}) })
+  const restart = () => refs.forEach((r, i) => restartVideoInTrim(r.current, pair[i]?.m?.trim))
   const toggle = () => { const p = !paused; setPaused(p); each(v => { if (p) v.pause(); else v.play()?.catch?.(() => {}) }) }
   return <>
     <h3 style={{ marginBottom: 10 }}>{t('Compare two dates')}</h3>
@@ -295,14 +505,16 @@ function CompareSide({ it, vref, rate, label }) {
   const elsewhere = it.m.local === true
   const main = useMediaUrl(it.m, { auto: !elsewhere })
   const poster = useMediaUrl(it.m.poster || null, { auto: !elsewhere })
+  useEffect(() => bindVideoTrim(vref.current, it.m.trim, { loop: true }), [main.url, it.m.trim?.startSec, it.m.trim?.endSec])
   return <figure className="fv-side">
     <div className="fv-stage" style={stageShape(it.m)}>
       {main.url
         ? <video ref={el => { vref.current = el; mute(el); if (el) el.playbackRate = rate }} src={main.url} poster={poster.url || undefined}
-            playsInline autoPlay loop muted preload="auto" aria-label={label} />
+            playsInline autoPlay loop={!it.m.trim} muted preload="auto" aria-label={label} />
         : poster.url ? <img src={poster.url} alt="" draggable={false} /> : <div className="fv-x"><Icon name="play" /></div>}
       {!main.url && <div className="fv-msg">{elsewhere ? t('On the phone that filmed it') : main.status === 'loading' ? t('Loading…') : t('This video isn’t on this device')}</div>}
     </div>
+    {it.m.trim && main.url && <TrimTimeline trim={it.m.trim} videoRef={vref} sourceKey={main.url} />}
     <figcaption><b>{fmtDate(it.d, true, true)}</b><span className="dim">{label}</span></figcaption>
   </figure>
 }

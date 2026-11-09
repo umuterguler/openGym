@@ -286,6 +286,18 @@ describe('fetchToStore', () => {
 })
 
 describe('localMediaGc', () => {
+  it('immediately removes only requested hashes absent from every state copy and editor draft', async () => {
+    for (const c of 'abcdefg') await put(hex(c))
+    storage.setItem('gym_state_v1', JSON.stringify({ customEx: [{ id: 'saved', media: refOf(hex('b')) }] }))
+    const store = appStore({ S: { customEx: [{ id: 'current', media: refOf(hex('a')) }] },
+      stashedMediaHashes: async () => new Set([hex('c')]) })
+    const release = media.hold([hex('g')])
+    const sync = make(store, { nativeLoad: async () => ({ customEx: [{ id: 'device-copy', media: refOf(hex('d')) }] }) })
+    expect(await sync.removeUnreferencedMedia('abcdefg'.split('').map(hex))).toBe(2)
+    expect((await media.list()).map(r => r.hash).sort()).toEqual('abcdg'.split('').map(hex).sort())
+    release()
+  })
+
   it('keeps what the state, the saved copy, a stash or the last hour refer to, and nothing else', async () => {
     for (const c of 'abcdef') await put(hex(c))
     clock += 2 * 3600000
