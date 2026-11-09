@@ -1,5 +1,16 @@
 apply plugin: 'com.android.application'
 
+// The personal install is signed with a long-lived key kept outside this checkout. This config is
+// isolated to the WorkoutTracker build type and cannot change official build signatures.
+def workoutTrackerSigningProperties = new Properties()
+def workoutTrackerSigningPath = System.getenv('WORKOUTTRACKER_SIGNING_PROPERTIES') ?: new File(
+    System.getProperty('user.home'), '.config/opengym/workouttracker/signing.properties'
+).absolutePath
+def workoutTrackerSigningFile = file(workoutTrackerSigningPath)
+if (workoutTrackerSigningFile.exists()) {
+    workoutTrackerSigningFile.withInputStream { workoutTrackerSigningProperties.load(it) }
+}
+
 android {
     namespace = "ch.duartesantos.opengym"
     compileSdk = rootProject.ext.compileSdkVersion
@@ -19,6 +30,16 @@ android {
             ignoreAssetsPattern = '!.svn:!.git:!.ds_store:!*.scc:.*:!CVS:!thumbs.db:!picasa.ini:!*~'
         }
     }
+    signingConfigs {
+        workoutTracker {
+            if (workoutTrackerSigningProperties.getProperty('storeFile')) {
+                storeFile file(workoutTrackerSigningProperties.getProperty('storeFile'))
+                storePassword workoutTrackerSigningProperties.getProperty('storePassword')
+                keyAlias workoutTrackerSigningProperties.getProperty('keyAlias')
+                keyPassword workoutTrackerSigningProperties.getProperty('keyPassword')
+            }
+        }
+    }
     buildTypes {
         release {
             minifyEnabled false
@@ -36,6 +57,14 @@ android {
             // can live on one device. The name/icon label is overridden by the debug resource
             // overlay in src/debug/res. The release build (the "real" app) is untouched.
             applicationIdSuffix ".test"
+        }
+        workoutTracker {
+            initWith release
+            matchingFallbacks = ['release']
+            applicationIdSuffix ".workouttracker"
+            signingConfig signingConfigs.workoutTracker
+            buildConfigField "String", "CHANNEL", '"personal"'
+            buildConfigField "boolean", "BACKGROUND_LOCATION", "true"
         }
     }
     // Where the app is installed from. "sideload" is the APK on GitHub and opengym.ch: it checks
@@ -81,6 +110,31 @@ android {
     // BACKGROUND_LOCATION false, lib/channel.js). Off by default.
     if (project.hasProperty('playWithoutBackgroundLocation')) {
         sourceSets.play.manifest.srcFile 'src/playNoBackgroundLocation/AndroidManifest.xml'
+    }
+}
+
+// Fail closed before a personal APK is produced unless its stable key and explicit upgrade version
+// are configured. An implicit/default version could be rejected or accidentally downgrade a user.
+tasks.configureEach { task ->
+    if (task.name ==~ /(?i).*(assemble|bundle).*workoutTracker.*/) {
+        task.doFirst {
+            if (!workoutTrackerSigningProperties.getProperty('storeFile')) {
+                throw new GradleException("WorkoutTracker signing is not configured. See docs/WORKOUTTRACKER_ANDROID.md.")
+            }
+            if (!project.hasProperty('workoutTrackerVersionCode')) {
+                throw new GradleException("Set -PworkoutTrackerVersionCode to a value above the installed app. See docs/WORKOUTTRACKER_ANDROID.md.")
+            }
+        }
+    }
+}
+
+// Keep personal versionCode bumps isolated from the official app's version sequence.
+androidComponents {
+    onVariants(selector().withBuildType('workoutTracker')) { variant ->
+        def requestedCode = providers.gradleProperty('workoutTrackerVersionCode')
+        variant.outputs.each { output ->
+            output.versionCode.set(requestedCode.map { it.toInteger() }.orElse(32))
+        }
     }
 }
 

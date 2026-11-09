@@ -1,11 +1,13 @@
 package ch.duartesantos.opengym;
 
 
-/** The APK from GitHub and opengym.ch installs its own updates (InstallPlugin). */
+/** Only the sideload channel installs updates from the official OpenGym release feed. */
 final class FlavorPlugins {
     private FlavorPlugins() {}
 
     static void register(MainActivity activity) {
-        activity.registerFlavorPlugin(InstallPlugin.class);
+        if ("sideload".equals(BuildConfig.CHANNEL)) {
+            activity.registerFlavorPlugin(InstallPlugin.class);
+        }
     }
 }

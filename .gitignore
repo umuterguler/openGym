@@ -48,3 +48,9 @@ assets/tee/
 assets/bmc-cover*
 # scripts/pdf/render-samples.mjs output (npm run pdf:check)
 frontend/pdf-samples/
+
+# Permanent personal Android signing material is kept outside the checkout. These patterns also
+# protect a mistakenly copied local key/config from entering Git.
+*.jks
+*.keystore
+frontend/android/workouttracker-signing.properties

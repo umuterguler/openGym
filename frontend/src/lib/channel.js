@@ -22,7 +22,7 @@ function channelInfo() {
     if (platform !== 'android') return { channel: 'web', gymReminder: false }
     try {
       const r = await registerPlugin('Channel').get()
-      const channel = r?.channel === 'play' || r?.channel === 'fdroid' ? r.channel : 'sideload'
+      const channel = ['play', 'fdroid', 'personal'].includes(r?.channel) ? r.channel : 'sideload'
       return { channel, gymReminder: r?.backgroundLocation !== false }
     } catch {
       return { channel: 'sideload', gymReminder: true }
@@ -50,4 +50,3 @@ export async function nativeScanner() {
   if (!MOBILE) return false
   return (await getChannel()) !== 'fdroid'
 }
-

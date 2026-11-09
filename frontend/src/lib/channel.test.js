@@ -47,6 +47,22 @@ describe('install channel', () => {
     expect(await gymReminderBuilt()).toBe(true)
   })
 
+  it('the permanent personal build uses manual, same-key releases instead of the official updater', async () => {
+    h.answer = { channel: 'personal' }
+    const { getChannel, selfUpdates } = await import('./channel.js')
+    expect(await getChannel()).toBe('personal')
+    expect(await selfUpdates()).toBe(false)
+
+    const { readFileSync } = await import('node:fs')
+    const app = new URL('../../android/app/', import.meta.url)
+    const gradle = readFileSync(new URL('build.gradle', app), 'utf8')
+    expect(gradle).toMatch(/workoutTracker \{[\s\S]*?buildConfigField "String", "CHANNEL", '\"personal\"'/)
+    const flavorPlugins = readFileSync(new URL('src/sideload/java/ch/duartesantos/opengym/FlavorPlugins.java', app), 'utf8')
+    expect(flavorPlugins).toMatch(/"sideload"\.equals\(BuildConfig\.CHANNEL\)/)
+    const manifest = readFileSync(new URL('src/workoutTracker/AndroidManifest.xml', app), 'utf8')
+    expect(manifest).toMatch(/REQUEST_INSTALL_PACKAGES[\s\S]*?tools:node="remove"/)
+  })
+
   it('the APK and the Play build scan with ML Kit', async () => {
     let m = await import('./channel.js')
     expect(await m.nativeScanner()).toBe(true)

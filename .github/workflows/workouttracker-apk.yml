@@ -1,0 +1,76 @@
+name: WorkoutTracker APK (manual)
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_ref:
+        description: Approved commit SHA or tag to build
+        required: true
+        type: string
+      version_code:
+        description: Monotonically increasing Android versionCode
+        required: true
+        type: number
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.release_ref }}
+          persist-credentials: false
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5.7.0
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: sdkmanager 'platforms;android-36' 'build-tools;36.0.0'
+      - name: Prepare the long-lived signing key
+        env:
+          KEYSTORE_BASE64: ${{ secrets.WORKOUTTRACKER_KEYSTORE_BASE64 }}
+          STORE_PASSWORD: ${{ secrets.WORKOUTTRACKER_STORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.WORKOUTTRACKER_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.WORKOUTTRACKER_KEY_PASSWORD }}
+        run: |
+          test -n "$KEYSTORE_BASE64" || { echo 'WorkoutTracker signing secrets are not configured' >&2; exit 1; }
+          mkdir -p "$HOME/.config/opengym/workouttracker"
+          echo "$KEYSTORE_BASE64" | base64 --decode > "$HOME/.config/opengym/workouttracker/release-key.jks"
+          chmod 600 "$HOME/.config/opengym/workouttracker/release-key.jks"
+          {
+            echo "storeFile=$HOME/.config/opengym/workouttracker/release-key.jks"
+            echo "storePassword=$STORE_PASSWORD"
+            echo "keyAlias=$KEY_ALIAS"
+            echo "keyPassword=$KEY_PASSWORD"
+          } > "$HOME/.config/opengym/workouttracker/signing.properties"
+          chmod 600 "$HOME/.config/opengym/workouttracker/signing.properties"
+      - run: npm ci
+        working-directory: frontend
+      - name: Build web bundle and sync Android assets
+        working-directory: frontend
+        run: |
+          npm run build
+          node ../scripts/catalogue/stage-media.mjs dist
+          npx cap sync android
+          node scripts/check-mobile-bundle.mjs
+      - name: Build signed personal APK
+        run: ./gradlew --no-daemon -PworkoutTrackerVersionCode=${{ inputs.version_code }} assembleSideloadWorkoutTracker
+        working-directory: frontend/android
+      - name: Verify package and signer
+        run: |
+          APK=frontend/android/app/build/outputs/apk/sideload/workoutTracker/app-sideload-workoutTracker.apk
+          "$ANDROID_HOME/build-tools/36.0.0/aapt" dump badging "$APK" | grep -F "package: name='ch.duartesantos.opengym.workouttracker'"
+          "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --print-certs "$APK"
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: OpenGym-WorkoutTracker-${{ inputs.version_code }}
+          path: frontend/android/app/build/outputs/apk/sideload/workoutTracker/app-sideload-workoutTracker.apk
+          if-no-files-found: error
+          retention-days: 30

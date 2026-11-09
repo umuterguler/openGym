@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">OpenGym WorkoutTracker</string>
+    <string name="title_activity_main">OpenGym WorkoutTracker</string>
+    <string name="package_name">ch.duartesantos.opengym.workouttracker</string>
+    <string name="custom_url_scheme">ch.duartesantos.opengym.workouttracker</string>
+</resources>
